@@ -310,52 +310,42 @@ __richacl_propagate_everyone(struct richacl_alloc *alloc, struct richace *who,
  * richacl_propagate_everyone  -  propagate everyone@ mask flags up the acl
  * @alloc:	acl and number of allocated entries
  *
- * Make sure for group@ and all other users, groups, and special
- * identifiers that they are allowed or denied all permissions that are
- * granted be the trailing everyone@ acl entry. If they are not, try to
- * add the missing permissions to existing allow acl entries for those
- * users, or introduce additional acl entries if that is not possible.
+ * Make sure that group@ and all other users and groups mentioned in the acl
+ * will not lose any permissions when finally applying the other mask to the
+ * everyone@ allow ace at the end of the acl.  We modify the permissions of
+ * existing entries or add new entries before the final everyone@ allow ace to
+ * achieve that.
  *
- * We do this so that no mask flags will get lost when finally applying
- * the file masks to the acl entries: otherwise, with an other file mask
- * that is more restrictive than the owner and/or group file mask, mask
- * flags that were allowed to processes in the owner and group classes
- * and that the other mask denies would be lost. For example, the
- * following two acls show the problem when mode 0664 is applied to
- * them:
+ * Entries for owner@ are ignored here; see richacl_set_owner_permissions().
  *
- *    masking without propagation (wrong)
- *    ===========================================================
- *    joe:r::allow		=> joe:r::allow
- *    everyone@:rwx::allow	=> everyone@:r::allow
- *    -----------------------------------------------------------
- *    joe:x::deny		=> joe:x::deny
- *    everyone@:rwx::allow	   everyone@:r::allow
+ * For example, the following acl implicitly grants everyone rwpx access:
  *
- * Note that the permissions of joe end up being more restrictive than
- * what the acl would allow when first computing the allowed flags and
- * then applying the respective mask. With propagation of permissions,
- * we get:
+ *    joe:r::allow
+ *    everyone@:rwpx::allow
  *
- *    masking with propagation (correct)
- *    ===========================================================
- *    joe:r::allow		=> joe:rw::allow
- *				   group@:rw::allow
- *    everyone@:rwx::allow	   everyone@:r::allow
- *    -----------------------------------------------------------
- *    joe:x::deny		=> joe:x::deny
- *				   joe:w::allow
- *                                 group@:rw::allow
- *    everyone@:rwx::allow	   everyone@:r::allow
+ * When applying mode 0660 to this acl, group@ would lose rwp access, and joe
+ * would lose wp access even though the mode does not exclude those
+ * permissions.  After propagating the everyone@ permissions, the result for
+ * applying mode 0660 becomes:
  *
- * The examples show the acls that would result from propagation with no
- * masking performed. In fact, we do apply the respective mask to the
- * acl entries before computing the propagation because this will save
- * us from adding acl entries that would end up with empty mask fields
- * later.
+ *    owner@:rwp::allow
+ *    joe:rwp::allow
+ *    group@:rwp::allow
  *
- * We add at most one entry for each who value no matter how many
- * entries each who value has already.
+ * Deny aces complicate the matter.  For example, the following acl grants
+ * everyone but joe write access:
+ *
+ *    joe:wp::deny
+ *    everyone@:rwpx::allow
+ *
+ * When applying mode 0660 to this acl, group@ would lose rwp access, and joe
+ * would lose r access.  After propagating the everyone@ permissions, the
+ * result for applying mode 0660 becomes:
+ *
+ *    owner@:rwp::allow
+ *    joe:w::deny
+ *    group@:rwp::allow
+ *    joe:r::allow
  */
 static int
 richacl_propagate_everyone(struct richacl_alloc *alloc)
@@ -377,12 +367,8 @@ richacl_propagate_everyone(struct richacl_alloc *alloc)
 	ace = acl->a_entries + acl->a_count - 1;
 	if (richace_is_inherit_only(ace) || !richace_is_everyone(ace))
 		return 0;
-	if (!(ace->e_mask & ~(acl->a_group_mask & acl->a_other_mask))) {
-		/* None of the allowed permissions will get masked. */
-		return 0;
-	}
-	group_allow = ace->e_mask & acl->a_group_mask;
 
+	group_allow = ace->e_mask & acl->a_group_mask;
 	if (group_allow & ~acl->a_other_mask) {
 		int n;
 
